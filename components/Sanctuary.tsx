@@ -20,6 +20,7 @@ const Sanctuary: React.FC<Props> = ({ state, updateState }) => {
     const [showFontControl, setShowFontControl] = useState(false);
     const [showPresenceControl, setShowPresenceControl] = useState(false);
     const [showLengthControl, setShowLengthControl] = useState(false);
+    const [activeModel, setActiveModel] = useState('');
     
     // Music Player State
     const [currentTrack, setCurrentTrack] = useState(() => PLAYLIST[Math.floor(Math.random() * PLAYLIST.length)]);
@@ -34,6 +35,21 @@ const Sanctuary: React.FC<Props> = ({ state, updateState }) => {
     const autoMode = state.settings.autoModeEnabled ?? false;
     
     const ownedCharacters = state.roster.filter(c => c.isOwned);
+
+    useEffect(() => {
+        let alive = true;
+        const loadModel = async () => {
+            try {
+                const response = await fetch('/api/ai/model');
+                if (!response.ok) return;
+                const data = await response.json();
+                if (alive) setActiveModel(data.model || '');
+            } catch { /* Keep the last known model while the server is temporarily unavailable. */ }
+        };
+        loadModel();
+        const timer = window.setInterval(loadModel, 10000);
+        return () => { alive = false; window.clearInterval(timer); };
+    }, []);
 
     useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -104,36 +120,44 @@ const Sanctuary: React.FC<Props> = ({ state, updateState }) => {
             const charProfiles = ownedCharacters
                 .filter(c => activeIds.includes(c.id))
                 .map(c => ({
+                    id: c.id,
                     name: c.name,
+                    title: c.title,
+                    charClass: c.charClass,
+                    race: c.race,
+                    weapon: c.weapon,
                     personality: c.personality || '渴望爱慕',
                     identity: c.desc,
                     appearance: c.appearance, // Pass appearance data
                     background: c.background, // Pass background data
                     boundaries: c.boundaries,
-                    consentStyle: c.consentStyle
+                    consentStyle: c.consentStyle,
+                    skills: c.skills,
+                    level: c.level,
+                    bond: c.bond
                 }));
 
             if (charProfiles.length === 0) {
-                charProfiles.push({
-                    name: "莉莉丝", 
-                    identity: "首席魅魔", 
-                    personality: "绝对服从", 
-                    appearance: "银色长发，紫水晶眼眸，身穿改造过的女仆装。", // Default fallback
-                    boundaries: "", 
-                    consentStyle: ""
-                });
+                updateState({ chatHistory: [...newHistory, {
+                    id: `${Date.now()}-system`,
+                    senderId: 'SYSTEM',
+                    senderName: '系统',
+                    content: '当前没有在场角色。请先在“在场角色”中勾选至少一名已拥有角色。',
+                    timestamp: Date.now(),
+                    toneTags: ['system']
+                }] });
+                setLoading(false);
+                return;
             }
 
             // EXPLICITLY LOGGING THE USED MODEL FOR DEBUGGING
-            console.log("Calling API with Model:", state.settings.model);
-
             const response = await generateChatReply(
                 {
                     baseUrl: '',
-                    model: state.settings.model // Ensure this is the latest
+                    model: activeModel
                 },
                 state.conversationSummary || "圣殿大厅。",
-                newHistory.slice(-10).map(m => ({ senderName: m.senderName, content: m.content })),
+                newHistory.slice(-20).map(m => ({ senderName: m.senderName, content: m.content })),
                 charProfiles,
                 input,
                 settingInput,
@@ -141,21 +165,44 @@ const Sanctuary: React.FC<Props> = ({ state, updateState }) => {
                 autoMode // Pass autoMode flag
             );
 
-            const replyMessages: ChatMessage[] = (response.messages || []).map((m, i) => ({
+            const activeProfileIds = new Set(charProfiles.map(profile => profile.id));
+            const activeProfilesById = new Map(charProfiles.map(profile => [profile.id, profile]));
+            const replyMessages: ChatMessage[] = (response.messages || [])
+                .filter(m => activeProfileIds.has(String(m.speakerId)))
+                .map((m, i) => ({
                 id: (Date.now() + i + 1).toString(),
                 senderId: m.speakerId,
-                senderName: m.speakerName,
+                senderName: activeProfilesById.get(String(m.speakerId))!.name,
                 content: m.content,
                 timestamp: Date.now(),
                 toneTags: m.toneTags
             }));
+            const systemReply = (response.messages || []).find(m => String(m.speakerId) === 'sys');
+            if (replyMessages.length === 0 && systemReply) {
+                replyMessages.push({
+                    id: `${Date.now()}-system-reply`,
+                    senderId: 'SYSTEM',
+                    senderName: '系统',
+                    content: systemReply.content,
+                    timestamp: Date.now(),
+                    toneTags: ['system']
+                });
+            }
 
             updateState({ 
                 chatHistory: [...newHistory, ...replyMessages],
                 conversationSummary: response.summaryDelta
             });
-        } catch (e) {
+        } catch (e: any) {
             console.error(e);
+            updateState({ chatHistory: [...newHistory, {
+                id: `${Date.now()}-error`,
+                senderId: 'SYSTEM',
+                senderName: '系统',
+                content: `本次回复未完成：${e?.message || 'AI 服务暂时不可用'}。请重试。`,
+                timestamp: Date.now(),
+                toneTags: ['error']
+            }] });
         } finally {
             setLoading(false);
         }
@@ -250,7 +297,7 @@ const Sanctuary: React.FC<Props> = ({ state, updateState }) => {
                     <div className="flex gap-2 items-center mt-0.5">
                         <span className="text-[9px] text-dim font-mono uppercase">Soul Link:</span>
                         <span className="text-[9px] font-mono font-bold text-green-400 animate-pulse border border-green-900 bg-green-900/20 px-1 rounded">
-                            {state.settings.model || "DISCONNECTED"}
+                            {activeModel || "DISCONNECTED"}
                         </span>
                     </div>
                 </div>

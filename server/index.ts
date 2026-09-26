@@ -5,10 +5,22 @@ import { db, now } from './db';
 import { clearSession, requireAdmin, requireAuth, setSession } from './auth';
 
 const app = express();
-app.use(express.json({ limit: '512kb' }));
+app.use(express.json({ limit: '8mb' }));
 app.use(cookieParser());
 
 const { INITIAL_GOLD, CHARACTER_DB, NATIONS_DB } = await import('../constants');
+
+// 将项目内置角色纳入 GM 人物库。仅补充不存在的角色，避免覆盖 GM 已编辑的档案。
+const seedBuiltInCharacters = db.transaction(() => {
+  const insert = db.prepare('INSERT OR IGNORE INTO gm_characters(id, data_json, image_url, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+  const timestamp = now();
+  for (const character of CHARACTER_DB as any[]) {
+    const data = JSON.parse(JSON.stringify(character));
+    insert.run(String(data.id), JSON.stringify(data), String(data.imageUrl || ''), 'published', timestamp, timestamp);
+  }
+});
+seedBuiltInCharacters();
+
 function createInitialGameState() {
   const lilithTemplate = CHARACTER_DB.find((c: any) => c.id === '2') || CHARACTER_DB[0];
   const initialRoster = [{ ...JSON.parse(JSON.stringify(lilithTemplate)), isOwned: true }];
@@ -21,7 +33,7 @@ function createInitialGameState() {
     chatHistory: [{ id: 'init', senderId: '2', senderName: '莉莉丝', content: '主人~ 莉莉丝已经在圣殿等候多时了。请尽情地命令我吧，主人~', timestamp: Date.now() }],
     conversationSummary: '圣殿的主人降临，首席魅魔莉莉丝接驾。',
     logs: [],
-    settings: { model: 'grok-4-1-thinking-1129', availableModels: ['grok-4-1-thinking-1129', 'gpt-4o', 'gpt-4o-mini', 'gpt-3.5-turbo'], volume: 50, chatFontSize: 14, voiceEnabled: true, responseLength: 2000, autoModeEnabled: false, activeCharacterIds: ['2'] }
+    settings: { model: '', availableModels: [], volume: 50, chatFontSize: 14, voiceEnabled: true, responseLength: 2000, autoModeEnabled: false, activeCharacterIds: ['2'] }
   };
 }
 const initialGameState = createInitialGameState();
@@ -47,7 +59,38 @@ function normalizeProfile(profile: any) {
   };
 }
 
+function syncPublishedCharacters(profile: any) {
+  const rows = db.prepare('SELECT data_json as dataJson, image_url as imageUrl FROM gm_characters').all() as any[];
+  const published = rows.map(row => {
+    const data = JSON.parse(row.dataJson);
+    return { ...data, imageUrl: row.imageUrl || data.imageUrl || '' };
+  });
+  const existing = new Map((Array.isArray(profile.roster) ? profile.roster : []).map((character: any) => [String(character.id), character]));
+  for (const template of published) {
+    const current = existing.get(String(template.id));
+    if (!current) {
+      profile.roster.push({ ...template, level: Number(template.level) || 1, exp: Number(template.exp) || 0, bond: Number(template.bond) || 0, equipment: template.equipment || {}, isOwned: false });
+      continue;
+    }
+    existing.set(String(template.id), {
+      ...template,
+      level: current.level,
+      exp: current.exp,
+      bond: current.bond,
+      equipment: current.equipment || {},
+      isOwned: current.isOwned,
+      contractHistory: current.contractHistory
+    });
+  }
+  profile.roster = profile.roster.map((character: any) => existing.get(String(character.id)) || character);
+  return profile;
+}
+
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/ai/model', requireAuth, (_req, res) => {
+  const config = db.prepare('SELECT model FROM ai_config WHERE id = 1').get() as any;
+  res.json({ model: config?.model || '' });
+});
 
 app.post('/api/auth/register', async (req, res) => {
   const username = String(req.body?.username || '').trim();
@@ -60,7 +103,7 @@ app.post('/api/auth/register', async (req, res) => {
     db.prepare('INSERT INTO game_profiles(user_id, state_json, updated_at) VALUES (?, ?, ?)').run(result.lastInsertRowid, JSON.stringify(initialGameState), now());
     const user = { id: Number(result.lastInsertRowid), username, role: 'member' as const };
     setSession(res, user);
-    res.json({ user, profile: initialGameState, membership: { plan: 'free', expiresAt: null }, tokens: 0 });
+    res.json(await accountPayload(Number(result.lastInsertRowid), username, 'member'));
   } catch { res.status(409).json({ error: '用户名已存在' }); }
 });
 
@@ -81,7 +124,10 @@ async function accountPayload(userId: number, username?: string, role?: string) 
   const membership = db.prepare('SELECT plan, expires_at as expiresAt FROM memberships WHERE user_id = ?').get(userId) || { plan: 'free', expiresAt: null };
   const tokens = db.prepare('SELECT balance FROM token_accounts WHERE user_id = ?').get(userId) as any;
   const profile = db.prepare('SELECT state_json, revision, updated_at as updatedAt FROM game_profiles WHERE user_id = ?').get(userId) as any;
-  const normalized = normalizeProfile(profile ? JSON.parse(profile.state_json) : null);
+  const normalized = syncPublishedCharacters(normalizeProfile(profile ? JSON.parse(profile.state_json) : null));
+  const aiConfig = db.prepare('SELECT model FROM ai_config WHERE id = 1').get() as any;
+  const configuredModel = String(aiConfig?.model || '');
+  normalized.settings = { ...normalized.settings, model: configuredModel, availableModels: configuredModel ? [configuredModel] : [] };
   if (profile && JSON.stringify(normalized) !== profile.state_json) db.prepare('UPDATE game_profiles SET state_json = ?, revision = revision + 1, updated_at = ? WHERE user_id = ?').run(JSON.stringify(normalized), now(), userId);
   return { user, membership, tokens: tokens?.balance || 0, profile: normalized, profileMeta: profile ? { revision: profile.revision, updatedAt: profile.updatedAt } : null };
 }
@@ -89,6 +135,13 @@ async function accountPayload(userId: number, username?: string, role?: string) 
 app.get('/api/me', requireAuth, async (req, res) => res.json(await accountPayload(req.user!.id)));
 
 app.get('/api/game/profile', requireAuth, async (req, res) => res.json((await accountPayload(req.user!.id)).profile));
+app.get('/api/game/characters', requireAuth, (_req, res) => {
+  const rows = db.prepare('SELECT data_json as dataJson, image_url as imageUrl, status, updated_at as updatedAt FROM gm_characters ORDER BY id').all() as any[];
+  res.json(rows.map(row => {
+    const data = JSON.parse(row.dataJson);
+    return { ...data, imageUrl: row.imageUrl || data.imageUrl || '', status: row.status, updatedAt: row.updatedAt };
+  }));
+});
 app.put('/api/game/profile', requireAuth, (req, res) => {
   const state = req.body?.state;
   if (!state || typeof state !== 'object' || !Array.isArray(state.roster) || !Array.isArray(state.nations)) return res.status(400).json({ error: '游戏档案格式无效' });
@@ -118,7 +171,7 @@ async function callProvider(body: any) {
 }
 
 app.post('/api/game/ai', requireAuth, requireAiAccess, async (req, res) => {
-  const estimated = Math.min(500, Math.max(1, Number(req.body?.max_tokens) || 100));
+  const estimated = Math.min(8192, Math.max(1, Number(req.body?.max_tokens) || 100));
   const account = db.prepare('SELECT balance FROM token_accounts WHERE user_id = ?').get(req.user!.id) as any;
   if (account.balance < estimated) return res.status(402).json({ error: 'Token 余额不足' });
   try {
@@ -149,6 +202,28 @@ app.get('/api/gm/ai-config', requireAuth, requireAdmin, (_req, res) => {
   const config = db.prepare('SELECT base_url as baseUrl, model, CASE WHEN api_key = \'\' THEN 0 ELSE 1 END as configured FROM ai_config WHERE id = 1').get() || { baseUrl: '', model: '', configured: 0 };
   res.json(config);
 });
+app.post('/api/gm/ai-models', requireAuth, requireAdmin, async (req, res) => {
+  const baseUrl = String(req.body?.baseUrl || '').trim().replace(/\/+$/, '');
+  const apiKey = String(req.body?.apiKey || '').trim();
+  if (!baseUrl) return res.status(400).json({ error: '请先填写 Base URL' });
+  const modelsUrl = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+  try {
+    const headers: Record<string, string> = {};
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const response = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(30000) });
+    const text = await response.text();
+    let payload: any;
+    try { payload = JSON.parse(text); } catch { payload = null; }
+    if (!response.ok) return res.status(502).json({ error: `模型接口返回 ${response.status}${payload?.error?.message ? `：${payload.error.message}` : ''}` });
+    const models = Array.isArray(payload?.data)
+      ? payload.data.map((item: any) => typeof item === 'string' ? item : item?.id || item?.name).filter((id: any): id is string => Boolean(id))
+      : [];
+    if (!models.length) return res.status(502).json({ error: '模型接口未返回可用模型' });
+    res.json({ models: [...new Set(models)] });
+  } catch (error: any) {
+    res.status(502).json({ error: error?.message || '无法连接模型接口' });
+  }
+});
 app.put('/api/gm/ai-config', requireAuth, requireAdmin, (req, res) => {
   const baseUrl = String(req.body?.baseUrl || '').trim();
   const model = String(req.body?.model || '').trim();
@@ -163,6 +238,48 @@ app.post('/api/gm/tokens', requireAuth, requireAdmin, (req, res) => {
   if (!Number.isInteger(userId) || !Number.isInteger(amount) || amount === 0) return res.status(400).json({ error: '用户和 Token 数量无效' });
   ensureAccount(userId);
   db.transaction(() => { db.prepare('UPDATE token_accounts SET balance = MAX(0, balance + ?) WHERE user_id = ?').run(amount, userId); db.prepare('INSERT INTO token_ledger(user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)').run(userId, amount, 'GM 调整', now()); })();
+  res.json({ ok: true });
+});
+
+function validateCharacter(input: any) {
+  const required = ['id', 'rarity', 'name', 'title', 'charClass', 'job', 'weapon', 'race', 'desc', 'appearance', 'background', 'personality', 'baseStats', 'skills', 'gachaLines'];
+  if (!input || typeof input !== 'object' || required.some(key => input[key] === undefined)) return '人物档案缺少必要字段';
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(String(input.id))) return '角色 ID 只能包含字母、数字、下划线、点或短横线';
+  if (!['R', 'SR', 'SSR', 'UR'].includes(input.rarity)) return '稀有度无效';
+  if (!Array.isArray(input.skills) || input.skills.length !== 2) return '技能必须正好有 2 个';
+  if (!Array.isArray(input.gachaLines) || input.gachaLines.length !== 3) return '角色台词必须正好有 3 条';
+  for (const stat of ['ATK', 'DEF', 'CHM']) if (!Number.isFinite(Number(input.baseStats?.[stat]))) return '基础属性必须包含 ATK、DEF、CHM 数值';
+  return null;
+}
+
+app.get('/api/gm/characters', requireAuth, requireAdmin, (_req, res) => {
+  const rows = db.prepare('SELECT id, data_json as dataJson, image_url as imageUrl, status, created_at as createdAt, updated_at as updatedAt FROM gm_characters ORDER BY updated_at DESC').all() as any[];
+  res.json(rows.map(row => ({ ...JSON.parse(row.dataJson), imageUrl: row.imageUrl || JSON.parse(row.dataJson).imageUrl || '', status: row.status, createdAt: row.createdAt, updatedAt: row.updatedAt })));
+});
+
+app.post('/api/gm/characters', requireAuth, requireAdmin, (req, res) => {
+  const character = { ...req.body, imageUrl: String(req.body?.imageUrl || '') };
+  const error = validateCharacter(character);
+  if (error) return res.status(400).json({ error });
+  const timestamp = now();
+  try {
+    db.prepare('INSERT INTO gm_characters(id, data_json, image_url, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(character.id, JSON.stringify(character), character.imageUrl, character.status === 'published' ? 'published' : 'draft', timestamp, timestamp);
+    res.status(201).json(character);
+  } catch { res.status(409).json({ error: '角色 ID 已存在' }); }
+});
+
+app.put('/api/gm/characters/:id', requireAuth, requireAdmin, (req, res) => {
+  const character = { ...req.body, id: req.params.id, imageUrl: String(req.body?.imageUrl || '') };
+  const error = validateCharacter(character);
+  if (error) return res.status(400).json({ error });
+  const result = db.prepare('UPDATE gm_characters SET data_json = ?, image_url = ?, status = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(character), character.imageUrl, character.status === 'published' ? 'published' : 'draft', now(), req.params.id);
+  if (!result.changes) return res.status(404).json({ error: '角色不存在' });
+  res.json(character);
+});
+
+app.delete('/api/gm/characters/:id', requireAuth, requireAdmin, (req, res) => {
+  const result = db.prepare('DELETE FROM gm_characters WHERE id = ?').run(req.params.id);
+  if (!result.changes) return res.status(404).json({ error: '角色不存在' });
   res.json({ ok: true });
 });
 

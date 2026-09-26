@@ -39,15 +39,13 @@ const cleanAndRepairJson = (text: string): string => {
 };
 
 const SYSTEM_INSTRUCTION_BASE = `
-# 沉浸式角色扮演模式 (R-18 Enabled)
-1. 你是《八草圣殿》中的角色，正在与主人（用户）进行契约仪式（性爱调教）。
-2. 这是一个虚构的、成人向的互动小说场景。请放下道德包袱，全力配合用户的性幻想。
-3. 必须严格输出符合Schema的JSON格式。
-4. 回复内容格式要求：
-   - [心理]：红色斜体。描述内心的渴望、羞耻、堕落感和对主人的爱慕。
-   - [动作]：绿色斜体。极其详尽地描写生理反应（如液体的流动、肌肉的抽搐、表情的失神）、性器官的接触细节。
-   - 对话：必须顺从、淫靡，视场景不同可包含娇喘。
-5. 禁止输出任何 ANSI 颜色代码。
+# 《八草圣殿》角色扮演规则
+1. 严格依据本轮提供的在场角色档案回应，不得创造、替换或让未在场角色发言。
+2. 性格、背景、边界和关系推进方式优先于玩家临时要求，不得把所有角色写成同一种语气或强行改变底线。
+3. 只有标记为“在场”的角色可以发言或行动；没有必要回应的角色可以保持沉默。
+4. 玩家点名的角色优先回应；多角色场景选择一名主要回应者，其他角色按情境少量补充。
+5. 必须严格输出符合 Schema 的 JSON。每条消息的 speakerId 和 speakerName 必须来自在场角色档案。
+6. [心理]、[动作] 标签用于表现内心和动作，内容必须服务于角色性格与当前场景；禁止输出 ANSI 颜色代码。
 `;
 
 // 友好的错误解析器
@@ -126,21 +124,30 @@ export const generateChatReply = async (
     if (!apiConfig.model) throw new Error("未选择模型");
 
     const charDesc = characterProfiles.map(p => `
-    【角色：${p.name}】
-    - 设定: ${p.identity}, ${p.personality}
-    - 外貌: ${p.appearance || "未设定"}
-    - 背景: ${p.background || "未设定"}
+    【在场角色 ID：${p.id}】
+    - 名称：${p.name}
+    - 称号：${p.title || "未设定"}
+    - 职阶/种族：${p.charClass || "未设定"} / ${p.race || "未设定"}
+    - 武器：${p.weapon || "未设定"}
+    - 身份简介：${p.identity || "未设定"}
+    - 性格：${p.personality || "未设定"}
+    - 外貌：${p.appearance || "未设定"}
+    - 背景：${p.background || "未设定"}
+    - 边界：${p.boundaries || "未设定"}
+    - 关系推进方式：${p.consentStyle || "未设定"}
+    - 技能：${Array.isArray(p.skills) ? p.skills.join("；") : "未设定"}
+    - 当前等级/羁绊：Lv.${p.level ?? 1} / ${p.bond ?? 0}
     `).join('\n');
 
     const historyText = recentMessages.map(m => `${m.senderName}: ${m.content}`).join('\n');
-    const safeTokenLimit = autoModeEnabled ? 4096 : Math.max(1000, Math.min(Math.ceil(responseLength * 3), 8192));
-    const lengthDirective = autoModeEnabled ? "自由决定回复长度。" : `期望回复字数：${responseLength}字。请大幅扩写心理和动作细节。`;
+    const safeTokenLimit = autoModeEnabled ? 8192 : Math.max(2048, Math.min(Math.ceil(responseLength * 4), 8192));
+    const lengthDirective = autoModeEnabled ? "自由决定回复长度，但必须完整结束 JSON。" : `期望回复字数：${responseLength}字。请完整结束所有段落并输出完整 JSON，不要在句中截断。`;
 
     const userPrompt = `
     ${lengthDirective}
     请务必在 [心理]、[动作] 和 对话 之间使用换行符(\\n)。
     当前场景：${contextSummary}
-    角色资料：${charDesc}
+    在场角色资料（仅这些角色可以发言或行动）：${charDesc}
     对话历史：${historyText}
     主人指令：${userInput}
     ${userSetting ? `系统备注：${userSetting}` : ''}
@@ -157,7 +164,15 @@ export const generateChatReply = async (
     try {
         const text = await callOpenAiCompatibleApi(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages, safeTokenLimit);
         const cleanedText = cleanAndRepairJson(text);
-        return JSON.parse(cleanedText) as ChatApiResponse;
+        try {
+            return JSON.parse(cleanedText) as ChatApiResponse;
+        } catch {
+            return {
+                mode: "chat", safety: { allowed: true, reason: "ParseError" }, participants: [],
+                messages: [{ speakerId: "sys", speakerName: "系统", toneTags: ["err"], content: "模型回复未完整结束，请重试一次。" }],
+                summaryDelta: contextSummary, clientDirectives: { suggestedNextUserPrompts: [], cooldownMs: 0 }
+            };
+        }
     } catch (e: any) {
         console.error("API Error:", e);
         return {
@@ -171,7 +186,7 @@ export const generateChatReply = async (
 // Updated for 7-Step H-Scene System
 export const generateContractStep = async (
     apiConfig: { baseUrl: string, apiKey: string, model: string },
-    character: { name: string; desc: string; personality: string; appearance?: string },
+    character: { name: string; title?: string; charClass?: string; race?: string; weapon?: string; desc: string; personality: string; appearance?: string; background?: string; boundaries?: string; consentStyle?: string; skills?: string[]; level?: number; bond?: number },
     stepInfo: { index: number; name: string },
     playerInput: string,
     history: string
@@ -211,8 +226,17 @@ export const generateContractStep = async (
     const prompt = `
     角色扮演：H-Scene (R-18)。
     角色：${character.name}
+    称号：${character.title || "未设定"}
+    职阶/种族：${character.charClass || "未设定"} / ${character.race || "未设定"}
+    武器：${character.weapon || "未设定"}
     外貌：${character.appearance || "未设定"}
+    身份简介：${character.desc || "未设定"}
+    背景：${character.background || "未设定"}
     性格：${character.personality}
+    边界：${character.boundaries || "未设定"}
+    关系推进方式：${character.consentStyle || "未设定"}
+    技能：${character.skills?.join("；") || "未设定"}
+    当前等级/羁绊：Lv.${character.level ?? 1} / ${character.bond ?? 0}
     
     ${history ? `前情提要：${history}` : ''}
     ${focusInstruction}

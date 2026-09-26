@@ -113,7 +113,22 @@ const ContractModal: React.FC<Props> = ({ character, modelKey, voiceEnabled, onC
 
             const response = await generateContractStep(
                 apiConfig,
-                { name: character.name, desc: character.desc, personality: character.personality, appearance: character.appearance },
+                {
+                    name: character.name,
+                    title: character.title,
+                    charClass: character.charClass,
+                    race: character.race,
+                    weapon: character.weapon,
+                    desc: character.desc,
+                    personality: character.personality,
+                    appearance: character.appearance,
+                    background: character.background,
+                    boundaries: character.boundaries,
+                    consentStyle: character.consentStyle,
+                    skills: character.skills,
+                    level: character.level,
+                    bond: character.bond
+                },
                 { index: nextStep, name: phaseName },
                 choiceText,
                 contextHistory

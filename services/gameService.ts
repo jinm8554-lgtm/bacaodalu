@@ -2,20 +2,34 @@
 import { Character, GameState, Item, Rarity, BattleStrategy } from '../types';
 import { CHARACTER_DB, INITIAL_GOLD, RARITY_RATES } from '../constants';
 
-const getRandomRarity = (): Rarity => {
-    const r = Math.random();
-    if (r < RARITY_RATES.UR) return 'UR';
-    if (r < RARITY_RATES.UR + RARITY_RATES.SSR) return 'SSR';
-    if (r < RARITY_RATES.UR + RARITY_RATES.SSR + RARITY_RATES.SR) return 'SR';
-    return 'R';
+export const RARITY_LEVEL_GROWTH: Record<Rarity, number> = {
+    UR: 0.15,
+    SSR: 0.12,
+    SR: 0.10,
+    R: 0.08
+};
+
+const getRandomRarity = (availableRarities: Rarity[] = ['UR', 'SSR', 'SR', 'R']): Rarity => {
+    const configured = availableRarities.map(rarity => ({ rarity, weight: RARITY_RATES[rarity] })).filter(item => item.weight > 0);
+    const total = configured.reduce((sum, item) => sum + item.weight, 0);
+    let roll = Math.random() * total;
+    for (const item of configured) {
+        roll -= item.weight;
+        if (roll < 0) return item.rarity;
+    }
+    return configured[configured.length - 1]?.rarity || 'SR';
 };
 
 export const pullCharacter = (roster: Character[]): { char: Character, isNew: boolean, reward: number } => {
-    const rarity = getRandomRarity();
-    const pool = CHARACTER_DB.filter(c => c.race === 'SUCCUBUS' && c.rarity === rarity);
-    const template = pool[Math.floor(Math.random() * pool.length)] || CHARACTER_DB[0]; 
+    // 玩家档案会由 GM 发布角色接口同步，优先使用同步后的模板，保留静态角色表作为兜底。
+    const templates = [...roster, ...CHARACTER_DB].filter((character, index, all) => all.findIndex(item => item.id === character.id) === index);
+    const availableRarities = (['UR', 'SSR', 'SR', 'R'] as Rarity[]).filter(rarity => templates.some(character => character.rarity === rarity));
+    const rarity = getRandomRarity(availableRarities);
+    // 召唤池包含所有已同步的角色，不再按种族限制；稀有度由抽取结果决定。
+    const pool = templates.filter(c => c.rarity === rarity);
+    const template = pool[Math.floor(Math.random() * pool.length)] || templates[0] || CHARACTER_DB[0];
 
-    const existing = roster.find(c => c.id === template.id);
+    const existing = roster.find(c => c.id === template.id && c.isOwned);
     if (existing) {
         // 重复角色：增加羁绊而不是金币，主人~
         const bondGain = rarity === 'UR' ? 300 : rarity === 'SSR' ? 100 : rarity === 'SR' ? 30 : 10;
@@ -60,6 +74,27 @@ export const upgradeItem = (item: Item, currentGold: number): { success: boolean
     if (newItem.stats.CHM) newItem.stats.CHM = Math.floor(newItem.stats.CHM * multiplier + 5);
 
     return { success: true, newItem, newGold: currentGold - cost, message: "强化成功！装备散发出更危险的气息..." };
+};
+
+export const getCharacterStats = (character: Character) => {
+    const equipment = character.equipment || {};
+    const equipmentStats = (['WEAPON', 'ARMOR', 'ACCESSORY', 'BOOTS'] as const).reduce((total, slot) => {
+        const stats = equipment[slot]?.stats || {};
+        return {
+            ATK: total.ATK + Number(stats.ATK || 0),
+            DEF: total.DEF + Number(stats.DEF || 0),
+            CHM: total.CHM + Number(stats.CHM || 0)
+        };
+    }, { ATK: 0, DEF: 0, CHM: 0 });
+    return {
+        base: character.baseStats,
+        equipment: equipmentStats,
+        total: {
+            ATK: Number(character.baseStats?.ATK || 0) + equipmentStats.ATK,
+            DEF: Number(character.baseStats?.DEF || 0) + equipmentStats.DEF,
+            CHM: Number(character.baseStats?.CHM || 0) + equipmentStats.CHM
+        }
+    };
 };
 
 interface BattleResult {
@@ -216,24 +251,23 @@ export const simulateBattle = (
     const updatedParty = activeParty.map(char => {
         let newExp = (char.exp || 0) + expGain;
         let newLevel = char.level;
-        const expToLevel = newLevel * 100;
-        
-        let leveledUp = false;
-        while (newExp >= expToLevel) {
-            newExp -= expToLevel;
+        let currentChar = char;
+        const growthRate = RARITY_LEVEL_GROWTH[currentChar.rarity] ?? RARITY_LEVEL_GROWTH.R;
+        while (newExp >= newLevel * 100) {
+            newExp -= newLevel * 100;
             newLevel++;
-            leveledUp = true;
+            currentChar = {
+                ...currentChar,
+                baseStats: {
+                    ATK: Math.max(currentChar.baseStats.ATK + 1, Math.floor(currentChar.baseStats.ATK * (1 + growthRate))),
+                    DEF: Math.max(currentChar.baseStats.DEF + 1, Math.floor(currentChar.baseStats.DEF * (1 + growthRate))),
+                    CHM: Math.max(currentChar.baseStats.CHM + 1, Math.floor(currentChar.baseStats.CHM * (1 + growthRate)))
+                }
+            };
+            logs.push(`✨ [${currentChar.name}] 欲望高涨！升级到了 Lv.${newLevel}！`);
         }
 
-        let newStats = { ...char.baseStats };
-        if (leveledUp) {
-            newStats.ATK = Math.floor(newStats.ATK * 1.1);
-            newStats.DEF = Math.floor(newStats.DEF * 1.1);
-            newStats.CHM = Math.floor(newStats.CHM * 1.1);
-            logs.push(`✨ [${char.name}] 欲望高涨！升级到了 Lv.${newLevel}！`);
-        }
-
-        return { ...char, level: newLevel, exp: newExp, baseStats: newStats };
+        return { ...currentChar, level: newLevel, exp: newExp };
     });
 
     if (victory) {

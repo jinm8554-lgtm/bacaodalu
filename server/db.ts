@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS ai_requests (
   created_at INTEGER NOT NULL,
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS gm_characters (
+  id TEXT PRIMARY KEY,
+  data_json TEXT NOT NULL,
+  image_url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 export const now = () => Date.now();

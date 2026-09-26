@@ -9,6 +9,7 @@ import WorldMap from './WorldMap';
 interface Props {
     state: GameState;
     updateState: (s: Partial<GameState>) => void;
+    modelKey?: string;
 }
 
 // Region-specific Background Music Mapping
@@ -21,7 +22,7 @@ const NATION_BGMS: Record<string, string> = {
     'n5': "https://raw.githubusercontent.com/jinm8554-lgtm/kkk/main/(%E6%95%99%E5%BB%B7%EF%BC%89Massive%20Pipe%20Organ%20chord%20holds.mp3" // 神圣教国 (Theocracy)
 };
 
-const Conquest: React.FC<Props> = ({ state, updateState }) => {
+const Conquest: React.FC<Props> = ({ state, updateState, modelKey = '' }) => {
     const nations = Array.isArray(state.nations) ? state.nations : [];
     const [selectedNationId, setSelectedNationId] = useState<string>(nations[0]?.id || 'n1');
     const [selectedLevel, setSelectedLevel] = useState<Level | null>(null);
@@ -128,7 +129,7 @@ const Conquest: React.FC<Props> = ({ state, updateState }) => {
             <div className="fixed inset-0 z-[200]">
                 <ContractModal 
                     character={contractTarget} 
-                    modelKey={state.settings.model}
+                    modelKey={modelKey}
                     voiceEnabled={state.settings.voiceEnabled ?? true}
                     onUpdateCharacter={(updatedChar) => {
                         // For captured bosses, we just update the local target state until close

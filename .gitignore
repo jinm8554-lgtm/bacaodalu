@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 data/
+!data/
+!data/characters/
+!data/characters/*.json
+data/*.sqlite
+data/*.sqlite-*
+scripts/
+!scripts/
+!scripts/export-characters.mjs
 .env
 .env.*
 !.env.example

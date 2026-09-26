@@ -2,12 +2,13 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { GameState, Character, Item, Rarity } from '../types';
 import { CHARACTER_DB } from '../constants';
-import { pullCharacter, pullEquipment, upgradeItem } from '../services/gameService';
+import { getCharacterStats, pullCharacter, pullEquipment, upgradeItem } from '../services/gameService';
 import ContractModal from './ContractModal';
 
 interface Props {
     state: GameState;
     updateState: (s: Partial<GameState>) => void;
+    modelKey?: string;
 }
 
 type HaremView = 'ROSTER' | 'INVENTORY' | 'FORGE' | 'GACHA';
@@ -16,7 +17,7 @@ type GachaPhase = 'IDLE' | 'CHANNELING' | 'EXPLODE' | 'RESULT';
 
 const HAREM_BGM = "https://raw.githubusercontent.com/jinm8554-lgtm/kkk/main/(Sound%20of%20ice%20clinking%20in%20a%20glass).mp3";
 
-const Harem: React.FC<Props> = ({ state, updateState }) => {
+const Harem: React.FC<Props> = ({ state, updateState, modelKey = '' }) => {
     const [view, setView] = useState<HaremView>('ROSTER');
     const [selectedCharId, setSelectedCharId] = useState<string | null>(null);
     const [charTab, setCharTab] = useState<CharTab>('PROFILE');
@@ -124,6 +125,7 @@ const Harem: React.FC<Props> = ({ state, updateState }) => {
     const ownedCharacters = (Array.isArray(state.roster) ? state.roster : []).filter(c => c.isOwned);
     const filteredRoster = ownedCharacters.filter(c => filterRarity === 'ALL' || c.rarity === filterRarity);
     const selectedChar = ownedCharacters.find(c => c.id === selectedCharId);
+    const selectedStats = selectedChar ? getCharacterStats(selectedChar) : null;
 
     const GLOW_COLORS = {
         UR: 'shadow-[0_0_150px_#ff0055] border-[#ff0055]', 
@@ -154,7 +156,12 @@ const Harem: React.FC<Props> = ({ state, updateState }) => {
                 const { char, isNew, reward } = pullCharacter(newRoster);
                 results.push({ char, isNew, reward });
                 if (isNew) {
-                    newRoster.push(char);
+                    const existingIndex = newRoster.findIndex(c => c.id === char.id);
+                    if (existingIndex >= 0) {
+                        newRoster[existingIndex] = char;
+                    } else {
+                        newRoster.push(char);
+                    }
                 } else {
                     const charIndex = newRoster.findIndex(c => c.id === char.id);
                     if (charIndex >= 0) {
@@ -311,15 +318,18 @@ const Harem: React.FC<Props> = ({ state, updateState }) => {
                                             <div className="grid grid-cols-3 gap-3 pt-2">
                                                 <div className="glass-panel p-2 rounded-xl border border-glass flex flex-col items-center">
                                                     <span className="text-[9px] text-dim uppercase tracking-widest">攻击</span>
-                                                    <span className="text-lg font-black text-white">{selectedChar.baseStats.ATK}</span>
+                                                    <span className="text-lg font-black text-white">{selectedStats?.total.ATK}</span>
+                                                    {selectedStats && selectedStats.equipment.ATK > 0 && <span className="text-[9px] text-green-400">基础 {selectedStats.base.ATK} + 装备 {selectedStats.equipment.ATK}</span>}
                                                 </div>
                                                 <div className="glass-panel p-2 rounded-xl border border-glass flex flex-col items-center">
                                                     <span className="text-[9px] text-dim uppercase tracking-widest">防御</span>
-                                                    <span className="text-lg font-black text-white">{selectedChar.baseStats.DEF}</span>
+                                                    <span className="text-lg font-black text-white">{selectedStats?.total.DEF}</span>
+                                                    {selectedStats && selectedStats.equipment.DEF > 0 && <span className="text-[9px] text-green-400">基础 {selectedStats.base.DEF} + 装备 {selectedStats.equipment.DEF}</span>}
                                                 </div>
                                                 <div className="glass-panel p-2 rounded-xl border border-glass flex flex-col items-center">
                                                     <span className="text-[9px] text-dim uppercase tracking-widest">魅力</span>
-                                                    <span className="text-lg font-black text-white">{selectedChar.baseStats.CHM}</span>
+                                                    <span className="text-lg font-black text-white">{selectedStats?.total.CHM}</span>
+                                                    {selectedStats && selectedStats.equipment.CHM > 0 && <span className="text-[9px] text-green-400">基础 {selectedStats.base.CHM} + 装备 {selectedStats.equipment.CHM}</span>}
                                                 </div>
                                             </div>
 
@@ -739,7 +749,7 @@ const Harem: React.FC<Props> = ({ state, updateState }) => {
             {showContract && selectedChar && (
                 <ContractModal 
                     character={selectedChar} 
-                    modelKey={state.settings.model} 
+                    modelKey={modelKey}
                     voiceEnabled={voiceEnabled} 
                     onUpdateCharacter={(updatedChar) => {
                         // Persist character history updates to global state
